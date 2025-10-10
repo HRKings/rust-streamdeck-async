@@ -84,6 +84,10 @@ async fn main() {
                 });
 
                 'infinite: loop {
+                    // Alternatively with streams:
+                    // let mut reader = device.get_reader(Duration::from_millis(10)).into_stream();
+                    // while let Some(update) = reader.next().await { ... }
+
                     // Read state changes
                     let mut reader = device.get_reader(Duration::from_millis(10));
                     while let Some(update) = reader.read().await {
