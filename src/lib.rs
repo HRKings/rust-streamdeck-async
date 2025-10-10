@@ -7,7 +7,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::iter::zip;
@@ -15,9 +15,10 @@ use std::str::Utf8Error;
 use std::sync::RwLock;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
+use futures_lite::stream::StreamExt;
 
 use crate::images::{convert_image, ImageRect};
-use hidapi::{HidApi, HidDevice, HidError, HidResult};
+use async_hid::{Device, DeviceReader, DeviceWriter, HidBackend, HidError, HidResult};
 use image::{DynamicImage, ImageError};
 
 use crate::info::{is_vendor_familiar, Kind};
@@ -30,46 +31,33 @@ pub mod util;
 /// Image processing functions
 pub mod images;
 
-/// Async Stream Deck
-#[cfg(feature = "async")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-pub mod asynchronous;
-#[cfg(feature = "async")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-pub use asynchronous::AsyncStreamDeck;
-
 /// Creates an instance of the HidApi
 ///
 /// Can be used if you don't want to link hidapi crate into your project
-pub fn new_hidapi() -> HidResult<HidApi> {
-    HidApi::new()
-}
-
-/// Actually refreshes the device list
-pub fn refresh_device_list(hidapi: &mut HidApi) -> HidResult<()> {
-    hidapi.refresh_devices()
+pub fn new_hidapi() -> HidBackend {
+    HidBackend::default()
 }
 
 /// Returns a list of devices as (Kind, Serial Number) that could be found using HidApi.
-///
-/// **WARNING:** To refresh the list, use [refresh_device_list]
-pub fn list_devices(hidapi: &HidApi) -> Vec<(Kind, String)> {
-    hidapi
-        .device_list()
+pub async fn list_devices(hidapi: &HidBackend) -> HidResult<HashMap<String, Kind>> {
+    let devices = hidapi
+        .enumerate()
+        .await?
         .filter_map(|d| {
-            if !is_vendor_familiar(&d.vendor_id()) {
+            if !is_vendor_familiar(&d.vendor_id) {
                 return None;
             }
 
-            if let Some(serial) = d.serial_number() {
-                Some((Kind::from_vid_pid(d.vendor_id(), d.product_id())?, serial.to_string()))
+            if let Some(serial) = d.serial_number.clone() {
+                Some((serial, Kind::from_vid_pid(d.vendor_id, d.product_id)?))
             } else {
                 None
             }
         })
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect()
+        .collect::<HashMap<_, _>>()
+        .await;
+
+    Ok(devices)
 }
 
 /// Type of input that the device produced
@@ -109,11 +97,16 @@ pub struct StreamDeck {
     /// Kind of the device
     kind: Kind,
     /// Connected HIDDevice
-    device: HidDevice,
+    device: Device,
+    /// HIDDevice Writer
+    device_writer: DeviceWriter,
+    /// HIDDevice Reader
+    device_reader: DeviceReader,
     /// Temporarily cache the image before sending it to the device
     image_cache: RwLock<Vec<ImageCache>>,
 }
 
+#[derive(Clone)]
 struct ImageCache {
     key: u8,
     image_data: Vec<u8>,
@@ -122,14 +115,26 @@ struct ImageCache {
 /// Static functions of the struct
 impl StreamDeck {
     /// Attempts to connect to the device
-    pub fn connect(hidapi: &HidApi, kind: Kind, serial: &str) -> Result<StreamDeck, StreamDeckError> {
-        let device = hidapi.open_serial(kind.vendor_id(), kind.product_id(), serial)?;
+    pub async fn connect(hidapi: &HidBackend, kind: Kind, serial: &str) -> Result<StreamDeck, StreamDeckError> {
+        let device_option = hidapi
+            .enumerate()
+            .await?
+            .find(|d| d.vendor_id == kind.vendor_id() && d.product_id == kind.product_id() && d.serial_number == Some(serial.to_string()))
+            .await;
 
-        Ok(StreamDeck {
-            kind,
-            device,
-            image_cache: RwLock::new(vec![]),
-        })
+        if let Some(device) = device_option {
+            let (device_reader, device_writer) = device.open().await?;
+
+            Ok(StreamDeck {
+                kind,
+                device,
+                device_reader,
+                device_writer,
+                image_cache: RwLock::new(vec![]),
+            })
+        } else {
+            Err(StreamDeckError::Device404)
+        }
     }
 }
 
@@ -142,29 +147,30 @@ impl StreamDeck {
 
     /// Returns manufacturer string of the device
     pub fn manufacturer(&self) -> Result<String, StreamDeckError> {
-        Ok(self.device.get_manufacturer_string()?.unwrap_or_else(|| "Unknown".to_string()))
+        todo!();
+        // Ok(self.device.get_manufacturer_string()?.unwrap_or_else(|| "Unknown".to_string()))
     }
 
     /// Returns product string of the device
-    pub fn product(&self) -> Result<String, StreamDeckError> {
-        Ok(self.device.get_product_string()?.unwrap_or_else(|| "Unknown".to_string()))
+    pub fn product(&self) -> Result<&str, StreamDeckError> {
+        Ok(&self.device.name)
     }
 
     /// Returns serial number of the device
-    pub fn serial_number(&self) -> Result<String, StreamDeckError> {
+    pub async fn serial_number(&mut self) -> Result<String, StreamDeckError> {
         match self.kind {
             Kind::Original | Kind::Mini => {
-                let bytes = get_feature_report(&self.device, 0x03, 17)?;
+                let bytes = get_feature_report(&mut self.device_reader, 0x03, 17).await?;
                 Ok(extract_str(&bytes[5..])?)
             }
 
             Kind::MiniMk2 | Kind::MiniMk2Module => {
-                let bytes = get_feature_report(&self.device, 0x03, 32)?;
+                let bytes = get_feature_report(&mut self.device_reader, 0x03, 32).await?;
                 Ok(extract_str(&bytes[5..])?)
             }
 
             _ => {
-                let bytes = get_feature_report(&self.device, 0x06, 32)?;
+                let bytes = get_feature_report(&mut self.device_reader, 0x06, 32).await?;
                 Ok(extract_str(&bytes[2..])?)
             }
         }
@@ -172,30 +178,30 @@ impl StreamDeck {
     }
 
     /// Returns firmware version of the StreamDeck
-    pub fn firmware_version(&self) -> Result<String, StreamDeckError> {
+    pub async fn firmware_version(&mut self) -> Result<String, StreamDeckError> {
         match self.kind {
             Kind::Original | Kind::Mini | Kind::MiniMk2 => {
-                let bytes = get_feature_report(&self.device, 0x04, 17)?;
+                let bytes = get_feature_report(&mut self.device_reader, 0x04, 17).await?;
                 Ok(extract_str(&bytes[5..])?)
             }
 
             Kind::MiniMk2Module => {
-                let bytes = get_feature_report(&self.device, 0xA1, 17)?;
+                let bytes = get_feature_report(&mut self.device_reader, 0xA1, 17).await?;
                 Ok(extract_str(&bytes[5..])?)
             }
 
             _ => {
-                let bytes = get_feature_report(&self.device, 0x05, 32)?;
+                let bytes = get_feature_report(&mut self.device_reader, 0x05, 32).await?;
                 Ok(extract_str(&bytes[6..])?)
             }
         }
     }
 
     /// Reads all possible input from Stream Deck device
-    pub fn read_input(&self, timeout: Option<Duration>) -> Result<StreamDeckInput, StreamDeckError> {
+    pub async fn read_input(&mut self, timeout: Option<Duration>) -> Result<StreamDeckInput, StreamDeckError> {
         match &self.kind {
             Kind::Plus => {
-                let data = read_data(&self.device, 14.max(5 + self.kind.encoder_count() as usize), timeout)?;
+                let data = read_data(&mut self.device_reader, 14.max(5 + self.kind.encoder_count() as usize), timeout).await?;
 
                 if data[0] == 0 {
                     return Ok(StreamDeckInput::NoData);
@@ -214,8 +220,8 @@ impl StreamDeck {
 
             _ => {
                 let data = match self.kind {
-                    Kind::Original | Kind::Mini | Kind::MiniMk2 | Kind::MiniMk2Module => read_data(&self.device, 1 + self.kind.key_count() as usize, timeout),
-                    _ => read_data(&self.device, 4 + self.kind.key_count() as usize + self.kind.touchpoint_count() as usize, timeout),
+                    Kind::Original | Kind::Mini | Kind::MiniMk2 | Kind::MiniMk2Module => read_data(&mut self.device_reader, 1 + self.kind.key_count() as usize, timeout).await,
+                    _ => read_data(&mut self.device_reader, 4 + self.kind.key_count() as usize + self.kind.touchpoint_count() as usize, timeout).await,
                 }?;
 
                 if data[0] == 0 {
@@ -228,14 +234,14 @@ impl StreamDeck {
     }
 
     /// Resets the device
-    pub fn reset(&self) -> Result<(), StreamDeckError> {
+    pub async fn reset(&mut self) -> Result<(), StreamDeckError> {
         match self.kind {
             Kind::Original | Kind::Mini | Kind::MiniMk2 | Kind::MiniMk2Module => {
                 let mut buf = vec![0x0B, 0x63];
 
                 buf.extend(vec![0u8; 15]);
 
-                Ok(send_feature_report(&self.device, buf.as_slice())?)
+                Ok(send_feature_report(&mut self.device_writer, buf.as_slice()).await?)
             }
 
             _ => {
@@ -243,13 +249,13 @@ impl StreamDeck {
 
                 buf.extend(vec![0u8; 30]);
 
-                Ok(send_feature_report(&self.device, buf.as_slice())?)
+                Ok(send_feature_report(&mut self.device_writer, buf.as_slice()).await?)
             }
         }
     }
 
     /// Sets brightness of the device, value range is 0 - 100
-    pub fn set_brightness(&self, percent: u8) -> Result<(), StreamDeckError> {
+    pub async fn set_brightness(&mut self, percent: u8) -> Result<(), StreamDeckError> {
         let percent = percent.clamp(0, 100);
 
         match self.kind {
@@ -258,7 +264,7 @@ impl StreamDeck {
 
                 buf.extend(vec![0u8; 11]);
 
-                Ok(send_feature_report(&self.device, buf.as_slice())?)
+                Ok(send_feature_report(&mut self.device_writer, buf.as_slice()).await?)
             }
 
             _ => {
@@ -266,48 +272,47 @@ impl StreamDeck {
 
                 buf.extend(vec![0u8; 29]);
 
-                Ok(send_feature_report(&self.device, buf.as_slice())?)
+                Ok(send_feature_report(&mut self.device_writer, buf.as_slice()).await?)
             }
         }
     }
 
-    fn send_image(&self, key: u8, image_data: &[u8]) -> Result<(), StreamDeckError> {
-        if key >= self.kind.key_count() {
+    async fn send_image(&mut self, key: u8, image_data: &[u8]) -> Result<(), StreamDeckError> {
+        let kind = self.kind.clone();
+
+        if key >= kind.key_count() {
             return Err(StreamDeckError::InvalidKeyIndex);
         }
 
-        let key = if let Kind::Original = self.kind { flip_key_index(&self.kind, key) } else { key };
+        let key = if let Kind::Original = &kind { flip_key_index(&kind, key) } else { key };
 
-        if !self.kind.is_visual() {
+        if !&kind.is_visual() {
             return Err(StreamDeckError::NoScreen);
         }
 
-        self.write_image_data_reports(
-            image_data,
-            WriteImageParameters::for_key(self.kind, image_data.len()),
-            |page_number, this_length, last_package| match self.kind {
-                Kind::Original => vec![0x02, 0x01, (page_number + 1) as u8, 0, if last_package { 1 } else { 0 }, key + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        self.write_image_data_reports(image_data, WriteImageParameters::for_key(kind, image_data.len()), |page_number, this_length, last_package| match kind {
+            Kind::Original => vec![0x02, 0x01, (page_number + 1) as u8, 0, if last_package { 1 } else { 0 }, key + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
 
-                Kind::Mini | Kind::MiniMk2 | Kind::MiniMk2Module => vec![0x02, 0x01, page_number as u8, 0, if last_package { 1 } else { 0 }, key + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            Kind::Mini | Kind::MiniMk2 | Kind::MiniMk2Module => vec![0x02, 0x01, page_number as u8, 0, if last_package { 1 } else { 0 }, key + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
 
-                _ => vec![
-                    0x02,
-                    0x07,
-                    key,
-                    if last_package { 1 } else { 0 },
-                    (this_length & 0xff) as u8,
-                    (this_length >> 8) as u8,
-                    (page_number & 0xff) as u8,
-                    (page_number >> 8) as u8,
-                ],
-            },
-        )?;
+            _ => vec![
+                0x02,
+                0x07,
+                key,
+                if last_package { 1 } else { 0 },
+                (this_length & 0xff) as u8,
+                (this_length >> 8) as u8,
+                (page_number & 0xff) as u8,
+                (page_number >> 8) as u8,
+            ],
+        })
+        .await?;
         Ok(())
     }
 
     /// Writes image data to Stream Deck device, changes must be flushed with `.flush()` before
     /// they will appear on the device!
-    pub fn write_image(&self, key: u8, image_data: &[u8]) -> Result<(), StreamDeckError> {
+    pub fn write_image(&mut self, key: u8, image_data: &[u8]) -> Result<(), StreamDeckError> {
         let cache_entry = ImageCache { key, image_data: image_data.to_vec() };
 
         self.image_cache.write()?.push(cache_entry);
@@ -317,7 +322,7 @@ impl StreamDeck {
 
     /// Writes image data to Stream Deck device's lcd strip/screen as region.
     /// Only Stream Deck Plus supports writing LCD regions, for Stream Deck Neo use write_lcd_fill
-    pub fn write_lcd(&self, x: u16, y: u16, rect: &ImageRect) -> Result<(), StreamDeckError> {
+    pub async fn write_lcd(&mut self, x: u16, y: u16, rect: &ImageRect) -> Result<(), StreamDeckError> {
         match self.kind {
             Kind::Plus => (),
             _ => return Err(StreamDeckError::UnsupportedOperation),
@@ -350,6 +355,7 @@ impl StreamDeck {
                 ]
             },
         )
+        .await
     }
 
     /// Writes image data to Stream Deck device's lcd strip/screen as full fill
@@ -360,27 +366,30 @@ impl StreamDeck {
     /// let image_data = convert_image_with_format(device.kind().lcd_image_format(), image).unwrap();
     /// device.write_lcd_fill(&image_data);
     /// ```
-    pub fn write_lcd_fill(&self, image_data: &[u8]) -> Result<(), StreamDeckError> {
+    pub async fn write_lcd_fill(&mut self, image_data: &[u8]) -> Result<(), StreamDeckError> {
         match self.kind {
-            Kind::Neo => self.write_image_data_reports(
-                image_data,
-                WriteImageParameters {
-                    image_report_length: 1024,
-                    image_report_payload_length: 1024 - 8,
-                },
-                |page_number, this_length, last_package| {
-                    vec![
-                        0x02,
-                        0x0b,
-                        0,
-                        if last_package { 1 } else { 0 },
-                        (this_length & 0xff) as u8,
-                        (this_length >> 8) as u8,
-                        (page_number & 0xff) as u8,
-                        (page_number >> 8) as u8,
-                    ]
-                },
-            ),
+            Kind::Neo => {
+                self.write_image_data_reports(
+                    image_data,
+                    WriteImageParameters {
+                        image_report_length: 1024,
+                        image_report_payload_length: 1024 - 8,
+                    },
+                    |page_number, this_length, last_package| {
+                        vec![
+                            0x02,
+                            0x0b,
+                            0,
+                            if last_package { 1 } else { 0 },
+                            (this_length & 0xff) as u8,
+                            (this_length >> 8) as u8,
+                            (page_number & 0xff) as u8,
+                            (page_number >> 8) as u8,
+                        ]
+                    },
+                )
+                .await
+            }
 
             Kind::Plus => {
                 let (w, h) = self.kind.lcd_strip_size().unwrap();
@@ -412,6 +421,7 @@ impl StreamDeck {
                         ]
                     },
                 )
+                .await
             }
 
             _ => Err(StreamDeckError::UnsupportedOperation),
@@ -420,29 +430,29 @@ impl StreamDeck {
 
     /// Sets button's image to blank, changes must be flushed with `.flush()` before
     /// they will appear on the device!
-    pub fn clear_button_image(&self, key: u8) -> Result<(), StreamDeckError> {
-        self.send_image(key, &self.kind.blank_image())
+    pub async fn clear_button_image(&mut self, key: u8) -> Result<(), StreamDeckError> {
+        self.send_image(key, &self.kind.blank_image()).await
     }
 
     /// Sets blank images to every button, changes must be flushed with `.flush()` before
     /// they will appear on the device!
-    pub fn clear_all_button_images(&self) -> Result<(), StreamDeckError> {
+    pub async fn clear_all_button_images(&mut self) -> Result<(), StreamDeckError> {
         for i in 0..self.kind.key_count() {
-            self.clear_button_image(i)?
+            self.clear_button_image(i).await?
         }
         Ok(())
     }
 
     /// Sets specified button's image, changes must be flushed with `.flush()` before
     /// they will appear on the device!
-    pub fn set_button_image(&self, key: u8, image: DynamicImage) -> Result<(), StreamDeckError> {
+    pub fn set_button_image(&mut self, key: u8, image: DynamicImage) -> Result<(), StreamDeckError> {
         let image_data = convert_image(self.kind, image)?;
         self.write_image(key, &image_data)?;
         Ok(())
     }
 
     /// Sets specified touch point's led strip color
-    pub fn set_touchpoint_color(&self, point: u8, red: u8, green: u8, blue: u8) -> Result<(), StreamDeckError> {
+    pub async fn set_touchpoint_color(&mut self, point: u8, red: u8, green: u8, blue: u8) -> Result<(), StreamDeckError> {
         if point >= self.kind.touchpoint_count() {
             return Err(StreamDeckError::InvalidTouchPointIndex);
         }
@@ -453,17 +463,22 @@ impl StreamDeck {
         buf.extend(vec![touchpoint_index]);
         buf.extend(vec![red, green, blue]);
 
-        Ok(send_feature_report(&self.device, buf.as_slice())?)
+        Ok(send_feature_report(&mut self.device_writer, buf.as_slice()).await?)
     }
 
     /// Flushes the button's image to the device
-    pub fn flush(&self) -> Result<(), StreamDeckError> {
-        if self.image_cache.read()?.is_empty() {
+    pub async fn flush(&mut self) -> Result<(), StreamDeckError> {
+        let image_cache_snapshot: Vec<_> = {
+            let image_cache = self.image_cache.read()?;
+            image_cache.iter().cloned().collect::<Vec<_>>() // clone the entries you need
+        };
+
+        if image_cache_snapshot.is_empty() {
             return Ok(());
         }
 
-        for image in self.image_cache.read()?.iter() {
-            self.send_image(image.key, &image.image_data)?;
+        for image in image_cache_snapshot.iter() {
+            self.send_image(image.key, &image.image_data).await?;
         }
 
         self.image_cache.write()?.clear();
@@ -472,18 +487,21 @@ impl StreamDeck {
     }
 
     /// Returns button state reader for this device
-    pub fn get_reader(self: &Arc<Self>) -> Arc<DeviceStateReader> {
-        #[allow(clippy::arc_with_non_send_sync)]
-        Arc::new(DeviceStateReader {
-            device: self.clone(),
+    pub fn get_reader(self: Self) -> DeviceStateReader {
+        let key_count = self.kind.key_count().clone();
+        let touchpoint_count = self.kind.touchpoint_count().clone();
+        let encoder_count = self.kind.encoder_count().clone();
+
+        DeviceStateReader {
+            device: Arc::new(Mutex::new(self)),
             states: Mutex::new(DeviceState {
-                buttons: vec![false; self.kind.key_count() as usize + self.kind.touchpoint_count() as usize],
-                encoders: vec![false; self.kind.encoder_count() as usize],
+                buttons: vec![false; key_count as usize + touchpoint_count as usize],
+                encoders: vec![false; encoder_count as usize],
             }),
-        })
+        }
     }
 
-    fn write_image_data_reports<T>(&self, image_data: &[u8], parameters: WriteImageParameters, header_fn: T) -> Result<(), StreamDeckError>
+    async fn write_image_data_reports<T>(&mut self, image_data: &[u8], parameters: WriteImageParameters, header_fn: T) -> Result<(), StreamDeckError>
     where
         T: Fn(usize, usize, bool) -> Vec<u8>,
     {
@@ -505,7 +523,7 @@ impl StreamDeck {
             // Adding padding
             buf.extend(vec![0u8; image_report_length - buf.len()]);
 
-            write_data(&self.device, &buf)?;
+            write_data(&mut self.device_writer, &buf).await?;
 
             bytes_remaining -= this_length;
             page_number += 1;
@@ -557,13 +575,11 @@ pub enum StreamDeckError {
     /// Failed to encode image
     ImageError(ImageError),
 
-    #[cfg(feature = "async")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    /// Tokio join error
-    JoinError(tokio::task::JoinError),
-
     /// Reader mutex was poisoned
     PoisonError,
+
+    /// No device was found
+    Device404,
 
     /// There's literally nowhere to write the image
     NoScreen,
@@ -607,13 +623,6 @@ impl From<Utf8Error> for StreamDeckError {
 impl From<ImageError> for StreamDeckError {
     fn from(e: ImageError) -> Self {
         Self::ImageError(e)
-    }
-}
-
-#[cfg(feature = "async")]
-impl From<tokio::task::JoinError> for StreamDeckError {
-    fn from(e: tokio::task::JoinError) -> Self {
-        Self::JoinError(e)
     }
 }
 
@@ -666,14 +675,14 @@ struct DeviceState {
 
 /// Button reader that keeps state of the Stream Deck and returns events instead of full states
 pub struct DeviceStateReader {
-    device: Arc<StreamDeck>,
+    pub device: Arc<Mutex<StreamDeck>>,
     states: Mutex<DeviceState>,
 }
 
 impl DeviceStateReader {
     /// Reads states and returns updates
-    pub fn read(&self, timeout: Option<Duration>) -> Result<Vec<DeviceStateUpdate>, StreamDeckError> {
-        let input = self.device.read_input(timeout)?;
+    pub async fn read(&mut self, timeout: Option<Duration>) -> Result<Vec<DeviceStateUpdate>, StreamDeckError> {
+        let input = self.device.lock()?.read_input(timeout).await?;
         let mut my_states = self.states.lock()?;
 
         let mut updates = vec![];
@@ -682,7 +691,7 @@ impl DeviceStateReader {
             StreamDeckInput::ButtonStateChange(buttons) => {
                 for (index, (their, mine)) in zip(buttons.iter(), my_states.buttons.iter()).enumerate() {
                     if their != mine {
-                        let key_count = self.device.kind.key_count();
+                        let key_count = self.device.lock()?.kind.key_count();
                         if index < key_count as usize {
                             if *their {
                                 updates.push(DeviceStateUpdate::ButtonDown(index as u8));
