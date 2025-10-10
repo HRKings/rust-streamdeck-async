@@ -1,43 +1,51 @@
 use std::str::{from_utf8, Utf8Error};
 use std::time::Duration;
-use hidapi::{HidDevice, HidError};
+use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader, DeviceWriter, HidResult};
+use futures_lite::FutureExt;
+
 use crate::{Kind, StreamDeckError, StreamDeckInput};
 
 /// Performs get_feature_report on [HidDevice]
-pub fn get_feature_report(device: &HidDevice, report_id: u8, length: usize) -> Result<Vec<u8>, HidError> {
+pub async fn get_feature_report(device: &mut DeviceReader, report_id: u8, length: usize) -> HidResult<Vec<u8>> {
     let mut buff = vec![0u8; length];
 
     // Inserting report id byte
     buff.insert(0, report_id);
 
     // Getting feature report
-    device.get_feature_report(buff.as_mut_slice())?;
+    device.read_input_report(buff.as_mut_slice()).await?;
 
     Ok(buff)
 }
 
 /// Performs send_feature_report on [HidDevice]
-pub fn send_feature_report(device: &HidDevice, payload: &[u8]) -> Result<(), HidError> {
-    device.send_feature_report(payload)
+pub async fn send_feature_report(device: &mut DeviceWriter, payload: &[u8]) -> HidResult<()> {
+    device.write_output_report(payload).await
 }
 
 /// Reads data from [HidDevice]. Blocking mode is used if timeout is specified
-pub fn read_data(device: &HidDevice, length: usize, timeout: Option<Duration>) -> Result<Vec<u8>, HidError> {
-    device.set_blocking_mode(timeout.is_some())?;
-
+pub async fn read_data(device: &mut DeviceReader, length: usize, timeout: Option<Duration>) -> HidResult<Vec<u8>> {
     let mut buf = vec![0u8; length];
 
     match timeout {
-        Some(timeout) => device.read_timeout(buf.as_mut_slice(), timeout.as_millis() as i32),
-        None => device.read(buf.as_mut_slice()),
-    }?;
+        Some(timeout) => {
+            device
+                .read_input_report(&mut buf)
+                .or(async {
+                    tokio::time::sleep(timeout).await;
+                    Ok(0)
+                })
+                .await?
+        }
+        None => device.read_input_report(&mut buf).await?,
+    };
 
     Ok(buf)
 }
 
 /// Writes data to [HidDevice]
-pub fn write_data(device: &HidDevice, payload: &[u8]) -> Result<usize, HidError> {
-    device.write(payload)
+pub async fn write_data(device: &mut DeviceWriter, payload: &[u8]) -> HidResult<()> {
+    device.write_output_report(payload).await
 }
 
 /// Extracts string from byte array, removing \0 symbols

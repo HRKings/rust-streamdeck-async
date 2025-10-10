@@ -1,5 +1,3 @@
-#[allow(unused_imports)]
-use std::sync::Arc;
 use image::{ColorType, DynamicImage, GenericImageView, ImageError};
 use image::codecs::bmp::BmpEncoder;
 use image::codecs::jpeg::JpegEncoder;
@@ -56,20 +54,6 @@ pub fn convert_image_with_format(image_format: ImageFormat, image: DynamicImage)
     }
 }
 
-/// Converts image into image data depending on provided kind of device, can be safely ran inside [multi_thread](tokio::runtime::Builder::new_multi_thread) runtime
-#[cfg(feature = "async")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-pub fn convert_image_async(kind: Kind, image: DynamicImage) -> Result<Vec<u8>, StreamDeckError> {
-    Ok(tokio::task::block_in_place(move || convert_image(kind, image))?)
-}
-
-/// Converts image into image data depending on provided image format, can be safely ran inside [multi_thread](tokio::runtime::Builder::new_multi_thread) runtime
-#[cfg(feature = "async")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-pub fn convert_image_with_format_async(format: ImageFormat, image: DynamicImage) -> Result<Vec<u8>, StreamDeckError> {
-    Ok(tokio::task::block_in_place(move || convert_image_with_format(format, image))?)
-}
-
 /// Rect to be used when trying to send image to lcd screen
 pub struct ImageRect {
     /// Width of the image
@@ -98,12 +82,5 @@ impl ImageRect {
             h: image_h as u16,
             data: buf,
         })
-    }
-
-    /// Converts image to image rect, can be safely ran inside [multi_thread](tokio::runtime::Builder::new_multi_thread) runtime
-    #[cfg(feature = "async")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-    pub fn from_image_async(image: DynamicImage) -> Result<ImageRect, StreamDeckError> {
-        tokio::task::block_in_place(move || ImageRect::from_image(image))
     }
 }
