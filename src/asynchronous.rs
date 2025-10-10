@@ -1,238 +1,397 @@
-//! Code from this module is using [block_in_place](tokio::task::block_in_place),
-//! and so they cannot be used in [current_thread](tokio::runtime::Builder::new_current_thread) runtimes
+//! Async implementation of Stream Deck interface
+//!
+//! This module provides an async wrapper around the synchronous hidapi library
+//! by using a dedicated worker thread that owns the HidDevice and communicates
+//! via channels with async code.
 
-use std::iter::zip;
 use std::sync::Arc;
 use std::time::Duration;
+use std::thread::JoinHandle;
 
-use hidapi::{HidApi, HidResult};
+use hidapi::{HidApi, HidDevice};
 use image::DynamicImage;
-use tokio::sync::Mutex;
-use tokio::task::block_in_place;
-use tokio::time::sleep;
+use tokio::sync::{mpsc, oneshot};
 
-use crate::{DeviceState, DeviceStateUpdate, Kind, list_devices, StreamDeck, StreamDeckError, StreamDeckInput};
-use crate::images::{convert_image_async, ImageRect};
+use crate::images::{convert_image, ImageRect};
+use crate::{Kind, StreamDeckError, StreamDeckInput, DeviceStateUpdate};
 
-/// Actually refreshes the device list, can be safely ran inside [multi_thread](tokio::runtime::Builder::new_multi_thread) runtime
-pub fn refresh_device_list_async(hidapi: &mut HidApi) -> HidResult<()> {
-    block_in_place(move || hidapi.refresh_devices())
+/// Commands that can be sent to the worker thread
+enum Command {
+    ReadInput {
+        timeout: Option<Duration>,
+        response: oneshot::Sender<Result<StreamDeckInput, StreamDeckError>>,
+    },
+    Reset {
+        response: oneshot::Sender<Result<(), StreamDeckError>>,
+    },
+    SetBrightness {
+        percent: u8,
+        response: oneshot::Sender<Result<(), StreamDeckError>>,
+    },
+    WriteImage {
+        key: u8,
+        image_data: Arc<[u8]>,
+        response: oneshot::Sender<Result<(), StreamDeckError>>,
+    },
+    WriteLcd {
+        x: u16,
+        y: u16,
+        rect: ImageRect,
+        response: oneshot::Sender<Result<(), StreamDeckError>>,
+    },
+    WriteLcdFill {
+        image_data: Arc<[u8]>,
+        response: oneshot::Sender<Result<(), StreamDeckError>>,
+    },
+    ClearButton {
+        key: u8,
+        response: oneshot::Sender<Result<(), StreamDeckError>>,
+    },
+    ClearAllButtons {
+        response: oneshot::Sender<Result<(), StreamDeckError>>,
+    },
+    SetTouchpointColor {
+        point: u8,
+        red: u8,
+        green: u8,
+        blue: u8,
+        response: oneshot::Sender<Result<(), StreamDeckError>>,
+    },
+    Flush {
+        response: oneshot::Sender<Result<(), StreamDeckError>>,
+    },
+    GetManufacturer {
+        response: oneshot::Sender<Result<String, StreamDeckError>>,
+    },
+    GetProduct {
+        response: oneshot::Sender<Result<String, StreamDeckError>>,
+    },
+    GetSerialNumber {
+        response: oneshot::Sender<Result<String, StreamDeckError>>,
+    },
+    GetFirmwareVersion {
+        response: oneshot::Sender<Result<String, StreamDeckError>>,
+    },
+    Shutdown,
 }
 
-/// Returns a list of devices as (Kind, Serial Number) that could be found using HidApi,
-/// can be safely ran inside [multi_thread](tokio::runtime::Builder::new_multi_thread) runtime
-///
-/// **WARNING:** To refresh the list, use [refresh_device_list]
-pub fn list_devices_async(hidapi: &HidApi) -> Vec<(Kind, String)> {
-    block_in_place(move || list_devices(hidapi))
-}
-
-/// Stream Deck interface suitable to be used in async, uses [block_in_place](block_in_place)
-/// so this wrapper cannot be used in [current_thread](tokio::runtime::Builder::new_current_thread) runtimes
-#[derive(Clone)]
+/// Async interface for Stream Deck device
 pub struct AsyncStreamDeck {
     kind: Kind,
-    device: Arc<Mutex<StreamDeck>>,
+    command_tx: mpsc::Sender<Command>,
+    worker_handle: Option<JoinHandle<()>>,
 }
 
-/// Static functions of the struct
 impl AsyncStreamDeck {
-    /// Attempts to connect to the device, can be safely ran inside [multi_thread](tokio::runtime::Builder::new_multi_thread) runtime
-    pub fn connect(hidapi: &HidApi, kind: Kind, serial: &str) -> Result<AsyncStreamDeck, StreamDeckError> {
-        let device = block_in_place(move || StreamDeck::connect(hidapi, kind, serial))?;
+    /// Connects to a Stream Deck device asynchronously
+    ///
+    /// This spawns a worker thread that owns the HidDevice and handles all I/O operations
+    pub fn connect(hidapi: &HidApi, kind: Kind, serial: &str) -> Result<Self, StreamDeckError> {
+        let device = hidapi.open_serial(kind.vendor_id(), kind.product_id(), serial)?;
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(32);
+
+        let worker_handle = std::thread::spawn(move || {
+            Self::worker_loop(device, kind, cmd_rx);
+        });
 
         Ok(AsyncStreamDeck {
             kind,
-            device: Arc::new(Mutex::new(device)),
+            command_tx: cmd_tx,
+            worker_handle: Some(worker_handle),
         })
     }
-}
 
-/// Instance methods of the struct
-impl AsyncStreamDeck {
-    /// Returns kind of the Stream Deck
+    /// Returns the kind of this Stream Deck device
     pub fn kind(&self) -> Kind {
         self.kind
     }
 
-    /// Returns manufacturer string of the device
-    pub async fn manufacturer(&self) -> Result<String, StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.manufacturer())
-    }
+    /// Worker thread that owns the HidDevice and processes commands
+    fn worker_loop(device: HidDevice, kind: Kind, mut cmd_rx: mpsc::Receiver<Command>) {
+        // Use the synchronous StreamDeck for actual operations
+        let sync_deck = crate::StreamDeck {
+            kind,
+            device,
+            image_cache: std::sync::RwLock::new(vec![]),
+        };
 
-    /// Returns product string of the device
-    pub async fn product(&self) -> Result<String, StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.product())
-    }
+        while let Some(cmd) = cmd_rx.blocking_recv() {
+            match cmd {
+                Command::Shutdown => break,
 
-    /// Returns serial number of the device
-    pub async fn serial_number(&self) -> Result<String, StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.serial_number())
-    }
+                Command::ReadInput { timeout, response } => {
+                    let result = sync_deck.read_input(timeout);
+                    let _ = response.send(result);
+                }
 
-    /// Returns firmware version of the StreamDeck
-    pub async fn firmware_version(&self) -> Result<String, StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.firmware_version())
-    }
+                Command::Reset { response } => {
+                    let result = sync_deck.reset();
+                    let _ = response.send(result);
+                }
 
-    /// Reads button states, awaits until there's data.
-    /// Poll rate determines how often button state gets checked
-    pub async fn read_input(&self, poll_rate: f32) -> Result<StreamDeckInput, StreamDeckError> {
-        loop {
-            let device = self.device.lock().await;
-            let data = block_in_place(move || device.read_input(None))?;
+                Command::SetBrightness { percent, response } => {
+                    let result = sync_deck.set_brightness(percent);
+                    let _ = response.send(result);
+                }
 
-            if !data.is_empty() {
-                return Ok(data);
+                Command::WriteImage { key, image_data, response } => {
+                    let result = sync_deck.write_image(key, &image_data);
+                    let _ = response.send(result);
+                }
+
+                Command::WriteLcd { x, y, rect, response } => {
+                    let result = sync_deck.write_lcd(x, y, &rect);
+                    let _ = response.send(result);
+                }
+
+                Command::WriteLcdFill { image_data, response } => {
+                    let result = sync_deck.write_lcd_fill(&image_data);
+                    let _ = response.send(result);
+                }
+
+                Command::ClearButton { key, response } => {
+                    let result = sync_deck.clear_button_image(key);
+                    let _ = response.send(result);
+                }
+
+                Command::ClearAllButtons { response } => {
+                    let result = sync_deck.clear_all_button_images();
+                    let _ = response.send(result);
+                }
+
+                Command::SetTouchpointColor { point, red, green, blue, response } => {
+                    let result = sync_deck.set_touchpoint_color(point, red, green, blue);
+                    let _ = response.send(result);
+                }
+
+                Command::Flush { response } => {
+                    let result = sync_deck.flush();
+                    let _ = response.send(result);
+                }
+
+                Command::GetManufacturer { response } => {
+                    let result = sync_deck.manufacturer();
+                    let _ = response.send(result);
+                }
+
+                Command::GetProduct { response } => {
+                    let result = sync_deck.product();
+                    let _ = response.send(result);
+                }
+
+                Command::GetSerialNumber { response } => {
+                    let result = sync_deck.serial_number();
+                    let _ = response.send(result);
+                }
+
+                Command::GetFirmwareVersion { response } => {
+                    let result = sync_deck.firmware_version();
+                    let _ = response.send(result);
+                }
             }
-
-            sleep(Duration::from_secs_f32(1.0 / poll_rate)).await;
         }
+    }
+
+    /// Sends a command and waits for response
+    async fn send_command<T>(&self, cmd_builder: impl FnOnce(oneshot::Sender<T>) -> Command) -> Result<T, StreamDeckError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.command_tx.send(cmd_builder(tx)).await.map_err(|_| StreamDeckError::BadData)?;
+
+        rx.await.map_err(|_| StreamDeckError::BadData)
+    }
+
+    /// Reads input from the Stream Deck device
+    pub async fn read_input(&self, timeout: Option<Duration>) -> Result<StreamDeckInput, StreamDeckError> {
+        self.send_command(|response| Command::ReadInput { timeout, response }).await?
     }
 
     /// Resets the device
     pub async fn reset(&self) -> Result<(), StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.reset())
+        self.send_command(|response| Command::Reset { response }).await?
     }
 
-    /// Sets brightness of the device, value range is 0 - 100
+    /// Sets the brightness of the device (0-100)
     pub async fn set_brightness(&self, percent: u8) -> Result<(), StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.set_brightness(percent))
+        self.send_command(|response| Command::SetBrightness { percent, response }).await?
     }
 
-    /// Writes image data to Stream Deck device, changes must be flushed with `.flush()` before
-    /// they will appear on the device!
-    pub async fn write_image(&self, key: u8, image_data: &[u8]) -> Result<(), StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.write_image(key, image_data))
-    }
-
-    /// Writes image data to Stream Deck device's lcd strip/screen as region.
-    /// Only Stream Deck Plus supports writing LCD regions, for Stream Deck Neo use write_lcd_fill
-    pub async fn write_lcd(&self, x: u16, y: u16, rect: &ImageRect) -> Result<(), StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.write_lcd(x, y, rect))
-    }
-
-    /// Writes image data to Stream Deck device's lcd strip/screen as full fill
+    /// Writes raw image data to a button
     ///
-    /// You can convert your images into proper image_data like this:
-    /// ```
-    /// use elgato_streamdeck::images::{convert_image_with_format_async};
-    /// let image_data = convert_image_with_format_async(device.kind().lcd_image_format(), image).await.unwrap();
-    /// device.write_lcd_fill(&image_data).await;
-    /// ```
+    /// Changes must be flushed with `.flush()` before they appear on the device
+    pub async fn write_image(&self, key: u8, image_data: &[u8]) -> Result<(), StreamDeckError> {
+        let image_data = Arc::from(image_data);
+        self.send_command(|response| Command::WriteImage { key, image_data, response }).await?
+    }
+
+    /// Writes image data to the LCD strip/screen as a region (Stream Deck Plus only)
+    pub async fn write_lcd(&self, x: u16, y: u16, rect: ImageRect) -> Result<(), StreamDeckError> {
+        self.send_command(|response| Command::WriteLcd { x, y, rect, response }).await?
+    }
+
+    /// Writes image data to fill the entire LCD strip/screen
     pub async fn write_lcd_fill(&self, image_data: &[u8]) -> Result<(), StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.write_lcd_fill(image_data))
+        let image_data = Arc::from(image_data);
+        self.send_command(|response| Command::WriteLcdFill { image_data, response }).await?
     }
 
-    /// Sets button's image to blank, changes must be flushed with `.flush()` before
-    /// they will appear on the device!
+    /// Clears a button's image
+    ///
+    /// Changes must be flushed with `.flush()` before they appear on the device
     pub async fn clear_button_image(&self, key: u8) -> Result<(), StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.clear_button_image(key))
+        self.send_command(|response| Command::ClearButton { key, response }).await?
     }
 
-    /// Sets blank images to every button, changes must be flushed with `.flush()` before
-    /// they will appear on the device!
+    /// Clears all button images
+    ///
+    /// Changes must be flushed with `.flush()` before they appear on the device
     pub async fn clear_all_button_images(&self) -> Result<(), StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.clear_all_button_images())
+        self.send_command(|response| Command::ClearAllButtons { response }).await?
     }
 
-    /// Sets specified button's image, changes must be flushed with `.flush()` before
-    /// they will appear on the device!
+    /// Sets a button's image from a DynamicImage
+    ///
+    /// Changes must be flushed with `.flush()` before they appear on the device
     pub async fn set_button_image(&self, key: u8, image: DynamicImage) -> Result<(), StreamDeckError> {
-        let image = convert_image_async(self.kind, image)?;
-
-        let device = self.device.lock().await;
-        block_in_place(move || device.write_image(key, &image))
+        let image_data = convert_image(self.kind, image)?;
+        self.write_image(key, &image_data).await
     }
 
-    /// Sets specified touch point's led strip color
+    /// Sets a touchpoint's LED strip color
     pub async fn set_touchpoint_color(&self, point: u8, red: u8, green: u8, blue: u8) -> Result<(), StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.set_touchpoint_color(point, red, green, blue))
+        self.send_command(|response| Command::SetTouchpointColor { point, red, green, blue, response }).await?
     }
 
-    /// Flushes the button's image to the device
+    /// Flushes all pending image changes to the device
     pub async fn flush(&self) -> Result<(), StreamDeckError> {
-        let device = self.device.lock().await;
-        block_in_place(move || device.flush())
+        self.send_command(|response| Command::Flush { response }).await?
     }
 
-    /// Returns button state reader for this device
-    pub fn get_reader(&self) -> Arc<AsyncDeviceStateReader> {
-        Arc::new(AsyncDeviceStateReader {
-            device: self.clone(),
-            states: Mutex::new(DeviceState {
-                buttons: vec![false; self.kind.key_count() as usize + self.kind.touchpoint_count() as usize],
-                encoders: vec![false; self.kind.encoder_count() as usize],
-            }),
-        })
+    /// Gets the manufacturer string
+    pub async fn manufacturer(&self) -> Result<String, StreamDeckError> {
+        self.send_command(|response| Command::GetManufacturer { response }).await?
     }
-}
 
-/// Button reader that keeps state of the Stream Deck and returns events instead of full states
-pub struct AsyncDeviceStateReader {
-    device: AsyncStreamDeck,
-    states: Mutex<DeviceState>,
-}
+    /// Gets the product string
+    pub async fn product(&self) -> Result<String, StreamDeckError> {
+        self.send_command(|response| Command::GetProduct { response }).await?
+    }
 
-impl AsyncDeviceStateReader {
-    /// Reads states and returns updates
-    pub async fn read(&self, poll_rate: f32) -> Result<Vec<DeviceStateUpdate>, StreamDeckError> {
-        let input = self.device.read_input(poll_rate).await?;
-        let mut my_states = self.states.lock().await;
+    /// Gets the serial number
+    pub async fn serial_number(&self) -> Result<String, StreamDeckError> {
+        self.send_command(|response| Command::GetSerialNumber { response }).await?
+    }
 
-        let mut updates = vec![];
+    /// Gets the firmware version
+    pub async fn firmware_version(&self) -> Result<String, StreamDeckError> {
+        self.send_command(|response| Command::GetFirmwareVersion { response }).await?
+    }
+
+    /// Creates a state reader that emits device state updates as a stream
+    ///
+    /// Note: This takes `&self` not `self`, so you can continue using the device
+    /// after creating a reader. The reader internally keeps an Arc to the device.
+    pub fn get_reader(&self) -> AsyncDeviceStateReader
+    where
+        Self: Sized,
+    {
+        let (tx, rx) = mpsc::channel(100);
+
+        // Clone the command sender to create an independent communication channel
+        let cmd_tx = self.command_tx.clone();
+        let kind = self.kind;
+
+        let handle = tokio::spawn(async move {
+            let mut button_states = vec![false; kind.key_count() as usize + kind.touchpoint_count() as usize];
+            let mut encoder_states = vec![false; kind.encoder_count() as usize];
+
+            loop {
+                // Create a temporary deck-like structure to send commands
+                let (response_tx, response_rx) = oneshot::channel();
+
+                if cmd_tx
+                    .send(Command::ReadInput {
+                        timeout: Some(Duration::from_millis(10)),
+                        response: response_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break; // Command channel closed, device is gone
+                }
+
+                match response_rx.await {
+                    Ok(Ok(input)) => {
+                        let updates = Self::process_input(input, &mut button_states, &mut encoder_states, kind.key_count());
+
+                        for update in updates {
+                            if tx.send(update).await.is_err() {
+                                return; // Receiver dropped, exit loop
+                            }
+                        }
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+            }
+        });
+
+        AsyncDeviceStateReader {
+            updates_rx: rx,
+            _worker_handle: handle,
+        }
+    }
+
+    /// Processes input and generates state updates
+    fn process_input(input: StreamDeckInput, button_states: &mut Vec<bool>, encoder_states: &mut Vec<bool>, key_count: u8) -> Vec<DeviceStateUpdate> {
+        let mut updates = Vec::new();
 
         match input {
-            StreamDeckInput::ButtonStateChange(buttons) => {
-                for (index, (their, mine)) in zip(buttons.iter(), my_states.buttons.iter()).enumerate() {
-                    if *their != *mine {
-                        if index < self.device.kind.key_count() as usize {
-                            if *their {
-                                updates.push(DeviceStateUpdate::ButtonDown(index as u8));
+            StreamDeckInput::ButtonStateChange(new_states) => {
+                let len = new_states.len().min(button_states.len());
+
+                for i in 0..len {
+                    if new_states[i] != button_states[i] {
+                        if i < key_count as usize {
+                            if new_states[i] {
+                                updates.push(DeviceStateUpdate::ButtonDown(i as u8));
                             } else {
-                                updates.push(DeviceStateUpdate::ButtonUp(index as u8));
+                                updates.push(DeviceStateUpdate::ButtonUp(i as u8));
                             }
-                        } else if *their {
-                            updates.push(DeviceStateUpdate::TouchPointDown(index as u8 - self.device.kind.key_count()));
+                        } else if new_states[i] {
+                            updates.push(DeviceStateUpdate::TouchPointDown(i as u8 - key_count));
                         } else {
-                            updates.push(DeviceStateUpdate::TouchPointUp(index as u8 - self.device.kind.key_count()));
+                            updates.push(DeviceStateUpdate::TouchPointUp(i as u8 - key_count));
                         }
                     }
                 }
 
-                my_states.buttons = buttons;
+                // Update our state vector - resize if necessary
+                if button_states.len() != new_states.len() {
+                    button_states.resize(new_states.len(), false);
+                }
+                button_states.copy_from_slice(&new_states);
             }
 
-            StreamDeckInput::EncoderStateChange(encoders) => {
-                for (index, (their, mine)) in zip(encoders.iter(), my_states.encoders.iter()).enumerate() {
-                    if *their != *mine {
-                        if *their {
-                            updates.push(DeviceStateUpdate::EncoderDown(index as u8));
+            StreamDeckInput::EncoderStateChange(new_states) => {
+                for (i, (&new, &old)) in new_states.iter().zip(encoder_states.iter()).enumerate() {
+                    if new != old {
+                        if new {
+                            updates.push(DeviceStateUpdate::EncoderDown(i as u8));
                         } else {
-                            updates.push(DeviceStateUpdate::EncoderUp(index as u8));
+                            updates.push(DeviceStateUpdate::EncoderUp(i as u8));
                         }
                     }
                 }
-
-                my_states.encoders = encoders;
+                encoder_states.copy_from_slice(&new_states);
             }
 
-            StreamDeckInput::EncoderTwist(twist) => {
-                for (index, change) in twist.iter().enumerate() {
-                    if *change != 0 {
-                        updates.push(DeviceStateUpdate::EncoderTwist(index as u8, *change));
+            StreamDeckInput::EncoderTwist(twists) => {
+                for (i, &twist) in twists.iter().enumerate() {
+                    if twist != 0 {
+                        updates.push(DeviceStateUpdate::EncoderTwist(i as u8, twist));
                     }
                 }
             }
@@ -245,15 +404,42 @@ impl AsyncDeviceStateReader {
                 updates.push(DeviceStateUpdate::TouchScreenLongPress(x, y));
             }
 
-            StreamDeckInput::TouchScreenSwipe(s, e) => {
-                updates.push(DeviceStateUpdate::TouchScreenSwipe(s, e));
+            StreamDeckInput::TouchScreenSwipe(start, end) => {
+                updates.push(DeviceStateUpdate::TouchScreenSwipe(start, end));
             }
 
-            _ => {}
+            StreamDeckInput::NoData => {}
         }
 
-        drop(my_states);
+        updates
+    }
+}
 
-        Ok(updates)
+impl Drop for AsyncStreamDeck {
+    fn drop(&mut self) {
+        // Send shutdown signal
+        let _ = self.command_tx.try_send(Command::Shutdown);
+
+        // Wait for worker thread to finish
+        if let Some(handle) = self.worker_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Async reader for device state changes
+pub struct AsyncDeviceStateReader {
+    updates_rx: mpsc::Receiver<DeviceStateUpdate>,
+    _worker_handle: tokio::task::JoinHandle<()>,
+}
+
+impl AsyncDeviceStateReader {
+    /// Reads the next state update
+    ///
+    /// Returns None when the reader is closed
+    pub async fn read(&mut self) -> Option<DeviceStateUpdate> {
+        self.updates_rx.recv().await
+    }
+
     }
 }
