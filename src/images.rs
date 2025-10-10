@@ -71,6 +71,7 @@ pub fn convert_image_with_format_async(format: ImageFormat, image: DynamicImage)
 }
 
 /// Rect to be used when trying to send image to lcd screen
+#[derive(Clone)]
 pub struct ImageRect {
     /// Width of the image
     pub w: u16,
