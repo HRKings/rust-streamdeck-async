@@ -21,9 +21,10 @@ async = [
   "tokio",
   "tokio/sync",
   "tokio/rt-multi-thread",
-  "tokio/time"
+  "tokio/time",
 ]
 strum = ["dep:strum"]
+default = [ "async" ]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
