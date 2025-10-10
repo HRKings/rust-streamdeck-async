@@ -197,9 +197,9 @@ impl AsyncStreamDeck {
     async fn send_command<T>(&self, cmd_builder: impl FnOnce(oneshot::Sender<T>) -> Command) -> Result<T, StreamDeckError> {
         let (tx, rx) = oneshot::channel();
 
-        self.command_tx.send(cmd_builder(tx)).await.map_err(|_| StreamDeckError::BadData)?;
+        self.command_tx.send(cmd_builder(tx)).await.map_err(|_| StreamDeckError::WorkerThreadSendError)?;
 
-        rx.await.map_err(|_| StreamDeckError::BadData)
+        rx.await.map_err(|_| StreamDeckError::WorkerThreadSendError)
     }
 
     /// Reads input from the Stream Deck device
