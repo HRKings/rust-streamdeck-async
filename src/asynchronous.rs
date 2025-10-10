@@ -4,6 +4,7 @@
 //! by using a dedicated worker thread that owns the HidDevice and communicates
 //! via channels with async code.
 
+use std::iter::zip;
 use std::sync::Arc;
 use std::time::Duration;
 use std::thread::JoinHandle;
@@ -350,20 +351,18 @@ impl AsyncStreamDeck {
 
         match input {
             StreamDeckInput::ButtonStateChange(new_states) => {
-                let len = new_states.len().min(button_states.len());
-
-                for i in 0..len {
-                    if new_states[i] != button_states[i] {
-                        if i < key_count as usize {
-                            if new_states[i] {
-                                updates.push(DeviceStateUpdate::ButtonDown(i as u8));
+                for (index, (incoming, current)) in zip(new_states.iter(), button_states.iter()).enumerate() {
+                    if incoming != current {
+                        if index < key_count as usize {
+                            if *incoming {
+                                updates.push(DeviceStateUpdate::ButtonDown(index as u8));
                             } else {
-                                updates.push(DeviceStateUpdate::ButtonUp(i as u8));
+                                updates.push(DeviceStateUpdate::ButtonUp(index as u8));
                             }
-                        } else if new_states[i] {
-                            updates.push(DeviceStateUpdate::TouchPointDown(i as u8 - key_count));
+                        } else if *incoming {
+                            updates.push(DeviceStateUpdate::TouchPointDown(index as u8 - key_count));
                         } else {
-                            updates.push(DeviceStateUpdate::TouchPointUp(i as u8 - key_count));
+                            updates.push(DeviceStateUpdate::TouchPointUp(index as u8 - key_count));
                         }
                     }
                 }
@@ -372,9 +371,9 @@ impl AsyncStreamDeck {
             }
 
             StreamDeckInput::EncoderStateChange(new_states) => {
-                for (i, (&new, &old)) in new_states.iter().zip(encoder_states.iter()).enumerate() {
-                    if new != old {
-                        if new {
+                for (i, (&incoming, &current)) in new_states.iter().zip(encoder_states.iter()).enumerate() {
+                    if incoming != current {
+                        if incoming {
                             updates.push(DeviceStateUpdate::EncoderDown(i as u8));
                         } else {
                             updates.push(DeviceStateUpdate::EncoderUp(i as u8));
