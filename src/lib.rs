@@ -566,6 +566,10 @@ pub enum StreamDeckError {
     /// Tokio join error
     JoinError(tokio::task::JoinError),
 
+    #[cfg(feature = "async")]
+    /// A `SendError` from the channel that handles the worker thread communication
+    WorkerThreadSendError,
+
     /// Reader mutex was poisoned
     PoisonError,
 
