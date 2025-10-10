@@ -292,7 +292,7 @@ impl AsyncStreamDeck {
     ///
     /// Note: This takes `&self` not `self`, so you can continue using the device
     /// after creating a reader. The reader internally keeps an Arc to the device.
-    pub fn get_reader(&self) -> AsyncDeviceStateReader
+    pub fn get_reader(&self, timeout: Duration) -> AsyncDeviceStateReader
     where
         Self: Sized,
     {
@@ -307,12 +307,12 @@ impl AsyncStreamDeck {
             let mut encoder_states = vec![false; kind.encoder_count() as usize];
 
             loop {
-                // Create a temporary deck-like structure to send commands
+                // Create a temporary structure to send commands
                 let (response_tx, response_rx) = oneshot::channel();
 
                 if cmd_tx
                     .send(Command::ReadInput {
-                        timeout: Some(Duration::from_millis(10)),
+                        timeout: Some(timeout),
                         response: response_tx,
                     })
                     .await
@@ -332,7 +332,7 @@ impl AsyncStreamDeck {
                         }
                     }
                     Ok(Err(_)) | Err(_) => {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        tokio::time::sleep(timeout).await;
                     }
                 }
             }
