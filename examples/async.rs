@@ -1,6 +1,7 @@
 #[cfg(not(feature = "async"))]
 compile_error!("The `async` feature must be enabled to compile this example.");
 
+use std::sync::Arc;
 use std::time::Duration;
 use image::open;
 
@@ -18,7 +19,7 @@ async fn main() {
                 println!("{:?} {} {}", kind, serial, kind.product_id());
 
                 // Connect to the device
-                let device = AsyncStreamDeck::connect(&hid, kind, &serial).expect("Failed to connect");
+                let device: Arc<AsyncStreamDeck> = Arc::new(AsyncStreamDeck::connect(&hid, kind, &serial).expect("Failed to connect"));
                 // Print out some info from the device
                 println!("Connected to '{}' with version '{}'", device.serial_number().await.unwrap(), device.firmware_version().await.unwrap());
 
@@ -58,17 +59,18 @@ async fn main() {
                 // Flush
                 device.flush().await.unwrap();
 
+                let device_for_animation = device.clone();
+
                 // Start new task to animate the button images
-                let device_clone = device.clone();
                 tokio::spawn(async move {
                     let mut index = 0;
                     let mut previous = 0;
 
                     loop {
-                        device_clone.set_button_image(index, image.clone()).await.unwrap();
-                        device_clone.set_button_image(previous, alternative.clone()).await.unwrap();
+                        device_for_animation.set_button_image(index, image.clone()).await.unwrap();
+                        device_for_animation.set_button_image(previous, alternative.clone()).await.unwrap();
 
-                        device_clone.flush().await.unwrap();
+                        device_for_animation.flush().await.unwrap();
 
                         sleep(Duration::from_secs_f32(0.5)).await;
 
@@ -81,21 +83,17 @@ async fn main() {
                     }
                 });
 
-                let reader = device.get_reader();
-
                 'infinite: loop {
-                    let updates = match reader.read(100.0).await {
-                        Ok(updates) => updates,
-                        Err(_) => break,
-                    };
-                    for update in updates {
+                    // Read state changes
+                    let mut reader = device.get_reader();
+                    while let Some(update) = reader.read().await {
                         match update {
                             DeviceStateUpdate::ButtonDown(key) => {
                                 println!("Button {} down", key);
                             }
                             DeviceStateUpdate::ButtonUp(key) => {
                                 println!("Button {} up", key);
-                                if key == device.kind().key_count() - 1 {
+                                if key == kind.key_count() - 1 {
                                     break 'infinite;
                                 }
                             }
@@ -119,7 +117,7 @@ async fn main() {
                             DeviceStateUpdate::TouchScreenPress(x, y) => {
                                 println!("Touch Screen press at {x}, {y}");
                                 if let Some(small) = &small {
-                                    device.write_lcd(x, y, small).await.unwrap();
+                                    device.write_lcd(x, y, small.clone()).await.unwrap();
                                 }
                             }
 
@@ -133,8 +131,6 @@ async fn main() {
                         }
                     }
                 }
-
-                drop(reader);
             }
         }
         Err(e) => eprintln!("Failed to create HidApi instance: {}", e),
