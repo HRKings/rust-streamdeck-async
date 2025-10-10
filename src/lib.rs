@@ -195,14 +195,18 @@ impl StreamDeck {
     pub fn read_input(&self, timeout: Option<Duration>) -> Result<StreamDeckInput, StreamDeckError> {
         match &self.kind {
             Kind::Plus => {
-                let data = read_data(&self.device, 14.max(5 + self.kind.encoder_count() as usize), timeout)?;
+                let data = read_data(&self.device, 14, timeout)?;
 
                 if data[0] == 0 {
                     return Ok(StreamDeckInput::NoData);
                 }
 
                 match &data[1] {
-                    0x0 => Ok(StreamDeckInput::ButtonStateChange(read_button_states(&self.kind, &data))),
+                    0x0 => {
+                        let mut new_states = read_button_states(&self.kind, &data);
+                        new_states.truncate(8);
+                        Ok(StreamDeckInput::ButtonStateChange(new_states))
+                    }
 
                     0x2 => Ok(read_lcd_input(&data)?),
 
