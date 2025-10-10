@@ -368,10 +368,6 @@ impl AsyncStreamDeck {
                     }
                 }
 
-                // Update our state vector - resize if necessary
-                if button_states.len() != new_states.len() {
-                    button_states.resize(new_states.len(), false);
-                }
                 button_states.copy_from_slice(&new_states);
             }
 
