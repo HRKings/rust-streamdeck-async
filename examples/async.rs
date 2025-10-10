@@ -62,7 +62,7 @@ async fn main() {
                 let device_for_animation = device.clone();
 
                 // Start new task to animate the button images
-                tokio::spawn(async move {
+                let animation_thread = tokio::spawn(async move {
                     let mut index = 0;
                     let mut previous = 0;
 
@@ -72,7 +72,7 @@ async fn main() {
 
                         device_for_animation.flush().await.unwrap();
 
-                        sleep(Duration::from_secs_f32(0.5)).await;
+                        sleep(Duration::from_millis(50)).await; // 50ms = 20fps
 
                         previous = index;
 
@@ -85,7 +85,7 @@ async fn main() {
 
                 'infinite: loop {
                     // Read state changes
-                    let mut reader = device.get_reader();
+                    let mut reader = device.get_reader(Duration::from_millis(10));
                     while let Some(update) = reader.read().await {
                         match update {
                             DeviceStateUpdate::ButtonDown(key) => {
@@ -131,6 +131,9 @@ async fn main() {
                         }
                     }
                 }
+
+                animation_thread.abort();
+                device.reset().await.expect("could not reset deck");
             }
         }
         Err(e) => eprintln!("Failed to create HidApi instance: {}", e),
