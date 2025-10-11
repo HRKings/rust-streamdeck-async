@@ -18,15 +18,10 @@ tokio-stream = { version = "0.1.17", optional = true }
 strum = { version = "0.27", features = ["derive"], optional = true }
 
 [features]
-async = [
-  "tokio",
-  "tokio/sync",
-  "tokio/rt-multi-thread",
-  "tokio/time",
-]
-"tokio-stream" = [ "async", "dep:tokio-stream" ]
+async = ["tokio", "tokio/sync", "tokio/rt-multi-thread", "tokio/time"]
+stream = ["async", "dep:tokio-stream"]
 strum = ["dep:strum"]
-default = [ "async" ]
+default = ["async"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
