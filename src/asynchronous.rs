@@ -456,7 +456,7 @@ impl AsyncDeviceStateReader {
     }
 
     /// Converts this reader into a Stream
-    #[cfg(feature = "tokio-stream")]
+    #[cfg(feature = "stream")]
     pub fn into_stream(self) -> impl tokio_stream::Stream<Item = DeviceStateUpdate> {
         tokio_stream::wrappers::ReceiverStream::new(self.updates_rx)
     }
