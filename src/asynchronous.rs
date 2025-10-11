@@ -365,7 +365,7 @@ impl AsyncStreamDeck {
     }
 
     /// Processes input and generates state updates
-    fn process_input(input: StreamDeckInput, button_states: &mut Vec<bool>, encoder_states: &mut Vec<bool>, key_count: u8) -> Vec<DeviceStateUpdate> {
+    fn process_input(input: StreamDeckInput, button_states: &mut [bool], encoder_states: &mut [bool], key_count: u8) -> Vec<DeviceStateUpdate> {
         let mut updates = Vec::new();
 
         match input {
