@@ -103,6 +103,25 @@ impl AsyncStreamDeck {
         })
     }
 
+    /// Explicitly shuts down the device and worker thread
+    ///
+    /// This is useful when you want to ensure cleanup happens immediately
+    /// rather than waiting for Drop. After calling this, the device cannot
+    /// be used anymore.
+    pub async fn shutdown_worker_thread(&self) -> Result<(), StreamDeckError> {
+        // Send shutdown signal
+        self.command_tx.send(Command::Shutdown).await.map_err(|_| StreamDeckError::WorkerThreadSendError)?;
+
+        Ok(())
+    }
+
+    /// Returns the number of active Arc references to this device
+    ///
+    /// Useful for debugging to see how many references are still alive
+    pub fn reference_count(self: &Arc<Self>) -> usize {
+        Arc::strong_count(self)
+    }
+
     /// Returns the kind of this Stream Deck device
     pub fn kind(&self) -> Kind {
         self.kind
