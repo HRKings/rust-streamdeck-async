@@ -76,7 +76,7 @@ pub enum Kind {
 
 impl Kind {
     /// Creates [Kind] variant from Vendor ID and Product ID
-    pub fn from_vid_pid(vid: u16, pid: u16) -> Option<Kind> {
+    pub const fn from_vid_pid(vid: u16, pid: u16) -> Option<Kind> {
         match vid {
             ELGATO_VENDOR_ID => match pid {
                 PID_STREAMDECK_ORIGINAL => Some(Kind::Original),
@@ -100,7 +100,7 @@ impl Kind {
     }
 
     /// Retrieves Product ID of the Stream Deck
-    pub fn product_id(&self) -> u16 {
+    pub const fn product_id(&self) -> u16 {
         match self {
             Kind::Original => PID_STREAMDECK_ORIGINAL,
             Kind::OriginalV2 => PID_STREAMDECK_ORIGINAL_V2,
@@ -120,7 +120,7 @@ impl Kind {
     }
 
     /// Retrieves Vendor ID used by Elgato hardware
-    pub fn vendor_id(&self) -> u16 {
+    pub const fn vendor_id(&self) -> u16 {
         match self {
             Kind::Original => ELGATO_VENDOR_ID,
             Kind::OriginalV2 => ELGATO_VENDOR_ID,
@@ -140,7 +140,7 @@ impl Kind {
     }
 
     /// Amount of keys the Stream Deck kind has
-    pub fn key_count(&self) -> u8 {
+    pub const fn key_count(&self) -> u8 {
         match self {
             Kind::Original | Kind::OriginalV2 | Kind::Mk2 | Kind::Mk2Scissor | Kind::Mk2Module => 15,
             Kind::Mini | Kind::MiniMk2 | Kind::MiniMk2Module => 6,
@@ -151,7 +151,7 @@ impl Kind {
     }
 
     /// Amount of button rows the Stream Deck kind has
-    pub fn row_count(&self) -> u8 {
+    pub const fn row_count(&self) -> u8 {
         match self {
             Kind::Original | Kind::OriginalV2 | Kind::Mk2 | Kind::Mk2Scissor | Kind::Mk2Module => 3,
             Kind::Mini | Kind::MiniMk2 | Kind::MiniMk2Module => 2,
@@ -162,7 +162,7 @@ impl Kind {
     }
 
     /// Amount of button columns the Stream Deck kind has
-    pub fn column_count(&self) -> u8 {
+    pub const fn column_count(&self) -> u8 {
         match self {
             Kind::Original | Kind::OriginalV2 | Kind::Mk2 | Kind::Mk2Scissor | Kind::Mk2Module => 5,
             Kind::Mini | Kind::MiniMk2 | Kind::MiniMk2Module => 3,
@@ -173,7 +173,7 @@ impl Kind {
     }
 
     /// Amount of encoders/knobs the Stream Deck kind has
-    pub fn encoder_count(&self) -> u8 {
+    pub const fn encoder_count(&self) -> u8 {
         match self {
             Kind::Plus => 4,
             _ => 0,
@@ -181,7 +181,7 @@ impl Kind {
     }
 
     /// Amount of touch points the Stream Deck kind has
-    pub fn touchpoint_count(&self) -> u8 {
+    pub const fn touchpoint_count(&self) -> u8 {
         match self {
             Kind::Neo => 2,
             _ => 0,
@@ -189,7 +189,7 @@ impl Kind {
     }
 
     /// Size of the LCD strip on the device
-    pub fn lcd_strip_size(&self) -> Option<(usize, usize)> {
+    pub const fn lcd_strip_size(&self) -> Option<(usize, usize)> {
         match self {
             Kind::Plus => Some((800, 100)),
             Kind::Neo => Some((248, 58)),
@@ -198,17 +198,17 @@ impl Kind {
     }
 
     /// Tells if the Stream Deck kind has a screen
-    pub fn is_visual(&self) -> bool {
+    pub const fn is_visual(&self) -> bool {
         !matches!(self, Kind::Pedal)
     }
 
     /// Key layout of the Stream Deck kind as (rows, columns)
-    pub fn key_layout(&self) -> (u8, u8) {
+    pub const fn key_layout(&self) -> (u8, u8) {
         (self.row_count(), self.column_count())
     }
 
     /// Image format used by the Stream Deck kind
-    pub fn key_image_format(&self) -> ImageFormat {
+    pub const fn key_image_format(&self) -> ImageFormat {
         match self {
             Kind::Original => ImageFormat {
                 mode: ImageMode::BMP,
@@ -245,12 +245,12 @@ impl Kind {
                 mirror: ImageMirroring::None,
             },
 
-            Kind::Pedal => ImageFormat::default(),
+            Kind::Pedal => ImageFormat::get_default_format(),
         }
     }
 
     /// Image format used by LCD screen, used for filling LCD
-    pub fn lcd_image_format(&self) -> Option<ImageFormat> {
+    pub const fn lcd_image_format(&self) -> Option<ImageFormat> {
         match self {
             Kind::Neo => Some(ImageFormat {
                 mode: ImageMode::JPEG,
@@ -277,7 +277,7 @@ impl Kind {
                     0x00, 0x00, 0x00, 0x00, 0xc0, 0x3c, 0x00, 0x00, 0xc4, 0x0e, 0x00, 0x00, 0xc4, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                 ];
 
-                let (ws, hs) = self.key_image_format().size;
+                let (ws, hs) = self.key_image_format().get_size();
 
                 data.extend(vec![0u8; ws * hs * 3]);
 
@@ -397,14 +397,24 @@ pub struct ImageFormat {
     pub mirror: ImageMirroring,
 }
 
-impl Default for ImageFormat {
-    fn default() -> Self {
+impl ImageFormat {
+    const fn get_default_format() -> Self {
         Self {
             mode: ImageMode::None,
             size: (0, 0),
             rotation: ImageRotation::Rot0,
             mirror: ImageMirroring::None,
         }
+    }
+
+    const fn get_size(&self) -> (usize, usize) {
+        self.size
+    }
+}
+
+impl Default for ImageFormat {
+    fn default() -> Self {
+        Self::get_default_format()
     }
 }
 
