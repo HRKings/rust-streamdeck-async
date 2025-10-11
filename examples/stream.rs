@@ -23,6 +23,9 @@ struct StreamDeckAnimated {
 async fn main() {
     let devices = Arc::new(RwLock::new(HashMap::new()));
 
+    // Use image-rs to load an image
+    let image = open("examples/no-place-like-localhost.jpg").unwrap();
+
     // Create instance of HidApi
     match new_hidapi() {
         Ok(hid) => {
@@ -40,8 +43,7 @@ async fn main() {
 
                 println!("Key count: {}", kind.key_count());
 
-                // Use image-rs to load an image
-                let image = open("examples/no-place-like-localhost.jpg").unwrap();
+                let image = image.clone();
                 let alternative = image.grayscale().brighten(-50);
 
                 // Write it to the device
@@ -105,9 +107,6 @@ async fn main() {
         let stream = streamdeck.device.get_reader(Duration::from_millis(10)).into_stream();
         stream_map.insert(path, stream);
     }
-
-    // Use image-rs to load an image
-    let image = open("examples/no-place-like-localhost.jpg").unwrap();
 
     while let Some((serial, update)) = stream_map.next().await {
         let devices_read = devices.read().await;
