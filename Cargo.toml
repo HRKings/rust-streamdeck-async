@@ -14,7 +14,10 @@ image = { version = "0.25", default-features = false, features = [
   "bmp",
   "jpeg",
 ] }
-tokio = { version = "1", features = [ "macros", "rt-multi-thread", "time" ]}
+tokio = { version = "1", features = [ "macros", "rt-multi-thread", "time", "sync" ]}
+
+[patch.crates-io]
+async-hid = { git = 'https://github.com/HRKings/async-hid' }
 
 [package.metadata.docs.rs]
 all-features = true
