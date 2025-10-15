@@ -8,16 +8,10 @@ repository = "https://github.com/OpenActionAPI/rust-elgato-streamdeck"
 license = "MPL-2.0"
 
 [dependencies]
-async-hid = { version = "0.4.4", features = [ "tokio" ], default-features = false }
+async-hid = { git = 'https://github.com/HRKings/async-hid', features = [ "tokio" ], default-features = false }
 futures-lite = "2.6.1"
-image = { version = "0.25", default-features = false, features = [
-  "bmp",
-  "jpeg",
-] }
-tokio = { version = "1", features = [ "macros", "rt-multi-thread", "time", "sync" ]}
-
-[patch.crates-io]
-async-hid = { git = 'https://github.com/HRKings/async-hid' }
+image = { version = "0.25", default-features = false, features = [ "bmp", "jpeg" ] }
+tokio = { version = "1", features = [ "macros", "rt-multi-thread", "time", "sync" ] }
 
 [package.metadata.docs.rs]
 all-features = true
