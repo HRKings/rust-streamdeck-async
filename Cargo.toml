@@ -11,7 +11,7 @@ license = "MPL-2.0"
 async-hid = { git = 'https://github.com/HRKings/async-hid', features = [ "tokio" ], default-features = false }
 futures-lite = "2.6.1"
 image = { version = "0.25", default-features = false, features = [ "bmp", "jpeg" ] }
-tokio = { version = "1", features = [ "macros", "rt-multi-thread", "time", "sync" ] }
+tokio = { version = "1.47.1", features = [ "macros", "rt-multi-thread", "time", "sync" ] }
 
 [features]
 strum = ["dep:strum"]
