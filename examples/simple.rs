@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use image::open;
 
-use elgato_streamdeck::{DeviceStateUpdate, StreamDeck, list_devices, new_hidapi};
-use elgato_streamdeck::images::{convert_image_with_format, ImageRect};
+use elgato_streamdeck_async::{DeviceStateUpdate, StreamDeck, list_devices, new_hidapi};
+use elgato_streamdeck_async::images::{convert_image_with_format, ImageRect};
 use tokio::time::sleep;
 
 #[tokio::main]
