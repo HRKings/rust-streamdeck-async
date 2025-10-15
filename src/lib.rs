@@ -13,9 +13,12 @@ use std::fmt::{Display, Formatter};
 use std::iter::zip;
 use std::str::Utf8Error;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
 use std::time::Duration;
+use tokio::sync::{Mutex, RwLock};
 use futures_lite::stream::StreamExt;
+
+#[cfg(feature = "stream")]
+use std::pin::Pin;
 
 use crate::images::{convert_image, ImageRect};
 use async_hid::{Device, DeviceReader, DeviceWriter, HidBackend, HidError, HidResult};
@@ -762,5 +765,27 @@ impl DeviceStateReader {
         drop(my_states);
 
         Ok(updates)
+    }
+
+    #[cfg(feature = "stream")]
+    /// Consumes the reader to turn it into a stream
+    pub fn into_stream(self, timeout: Option<Duration>) -> Pin<Box<dyn tokio_stream::Stream<Item = Result<DeviceStateUpdate, StreamDeckError>> + Send>> {
+        let stream = async_stream::stream! {
+            loop {
+                match self.read(timeout).await {
+                    Ok(updates) => {
+                        for update in updates {
+                            yield Ok(update);
+                        }
+                    }
+                    Err(e) => {
+                        yield Err(e);
+                        break; // Stop on error
+                    }
+                }
+            }
+        };
+
+        Box::pin(stream)
     }
 }

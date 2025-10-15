@@ -12,10 +12,13 @@ async-hid = { git = 'https://github.com/HRKings/async-hid', features = [ "tokio"
 futures-lite = "2.6.1"
 image = { version = "0.25", default-features = false, features = [ "bmp", "jpeg" ] }
 tokio = { version = "1.47.1", features = [ "macros", "rt-multi-thread", "time", "sync" ] }
+tokio-stream = { version = "0.1.17", optional = true }
+async-stream = { version = "0.3.6", optional = true }
+strum = { version = "0.27", features = ["derive"], optional = true }
 
 [features]
 strum = ["dep:strum"]
-stream = ["dep:tokio-stream"]
+stream = ["dep:tokio-stream", "dep:async-stream"]
 
 [package.metadata.docs.rs]
 all-features = true
