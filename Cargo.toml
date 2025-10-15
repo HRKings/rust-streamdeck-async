@@ -1,10 +1,10 @@
 [package]
-name = "elgato-streamdeck"
-description = "HidApi driver for Elgato Stream Deck devices"
-authors = ["TheJebForge", "nekename"]
-version = "0.11.1"
+name = "elgato-streamdeck-async"
+description = "Async HidApi driver for Elgato Stream Deck devices"
+authors = ["TheJebForge", "nekename", "HRKings"]
+version = "0.1.0"
 edition = "2024"
-repository = "https://github.com/OpenActionAPI/rust-elgato-streamdeck"
+repository = "https://github.com/HRKings/rust-streamdeck-async"
 license = "MPL-2.0"
 
 [dependencies]
@@ -12,6 +12,10 @@ async-hid = { git = 'https://github.com/HRKings/async-hid', features = [ "tokio"
 futures-lite = "2.6.1"
 image = { version = "0.25", default-features = false, features = [ "bmp", "jpeg" ] }
 tokio = { version = "1", features = [ "macros", "rt-multi-thread", "time", "sync" ] }
+
+[features]
+strum = ["dep:strum"]
+stream = ["dep:tokio-stream"]
 
 [package.metadata.docs.rs]
 all-features = true
