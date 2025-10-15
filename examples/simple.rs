@@ -1,37 +1,37 @@
 use std::sync::Arc;
 use std::time::Duration;
-
 use image::open;
 
-use elgato_streamdeck::{DeviceStateUpdate, list_devices, new_hidapi, StreamDeck};
+use elgato_streamdeck::{DeviceStateUpdate, StreamDeck, list_devices, new_hidapi};
 use elgato_streamdeck::images::{convert_image_with_format, ImageRect};
+use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() {
     // Create instance of HidApi
     let hid = new_hidapi();
+    let devices = list_devices(&hid).await.expect("Could not list devices");
 
-    for (serial, kind) in list_devices(&hid).await.expect("Could not list HID devices") {
-        println!("Found: {:?} {} {}", kind, serial, kind.product_id());
+    for (serial, kind) in devices {
+        println!("{:?} {} {}", kind, serial, kind.product_id());
 
         // Connect to the device
-        let mut device = StreamDeck::connect(&hid, kind, &serial).await.expect("Failed to connect");
-        // Print out some info from the device
-        println!(
-            "Connected to '{}' with version '{}'",
-            device.serial_number().await.expect("Could not get serial number"),
-            device.firmware_version().await.expect("Could not get firmware version")
-        );
+        let device = Arc::new(StreamDeck::connect(&hid, kind, &serial).await.expect("Could not connect to device"));
 
-        device.set_brightness(50).await.expect("Could not set the brightness");
+        // Print out some info from the device
+        println!("Connected to '{}' with version '{}'", device.serial_number().await.unwrap(), device.firmware_version().await.unwrap());
+
+        device.set_brightness(50).await.unwrap();
         device.clear_all_button_images().await.unwrap();
+
         // Use image-rs to load an image
         let image = open("examples/no-place-like-localhost.jpg").unwrap();
+        let alternative = image.grayscale().brighten(-50);
 
         println!("Key count: {}", kind.key_count());
         // Write it to the device
         for i in 0..kind.key_count() {
-            device.set_button_image(i, image.clone()).unwrap();
+            device.set_button_image(i, image.clone()).await.expect("Could not set button image");
         }
 
         println!("Touch point count: {}", kind.touchpoint_count());
@@ -42,7 +42,7 @@ async fn main() {
         if let Some(format) = device.kind().lcd_image_format() {
             let scaled_image = image.clone().resize_to_fill(format.size.0 as u32, format.size.1 as u32, image::imageops::FilterType::Nearest);
             let converted_image = convert_image_with_format(format, scaled_image).unwrap();
-            let _ = device.write_lcd_fill(&converted_image);
+            let _ = device.write_lcd_fill(&converted_image).await;
         }
 
         let small = match device.kind().lcd_strip_size() {
@@ -57,19 +57,39 @@ async fn main() {
         // Flush
         device.flush().await.unwrap();
 
-        // #[allow(clippy::arc_with_non_send_sync)]
-        // let device = Arc::new(device);
+        let device_for_animation = device.clone();
 
-        let kind = device.kind().clone();
-        {
-            let mut reader = device.get_reader();
+        // Start new task to animate the button images
+        let animation_thread = tokio::spawn(async move {
+            let mut index = 0;
+            let mut previous = 0;
 
-            'infinite: loop {
-                let updates = match reader.read(Some(Duration::from_secs_f64(100.0))).await {
-                    Ok(updates) => updates,
-                    Err(_) => break,
-                };
+            loop {
+                device_for_animation.set_button_image(index, image.clone()).await.expect("Could not set button image");
+                device_for_animation.set_button_image(previous, alternative.clone()).await.expect("Could not set button image");
 
+                device_for_animation.flush().await.unwrap();
+
+                sleep(Duration::from_millis(50)).await; // 50ms = 20fps
+
+                previous = index;
+
+                index += 1;
+                if index >= kind.key_count() {
+                    index = 0;
+                }
+            }
+        });
+
+        'infinite: loop {
+            // Alternatively with streams:
+            // let mut reader = device.get_reader(Duration::from_millis(10)).into_stream();
+            // while let Some(update) = reader.next().await { ... }
+
+            // Read state changes
+            let reader = device.clone().get_reader().await.expect("Could not get reader");
+
+            while let Ok(updates) = reader.read(Some(Duration::from_millis(10))).await {
                 for update in updates {
                     match update {
                         DeviceStateUpdate::ButtonDown(key) => {
@@ -101,7 +121,7 @@ async fn main() {
                         DeviceStateUpdate::TouchScreenPress(x, y) => {
                             println!("Touch Screen press at {x}, {y}");
                             if let Some(small) = &small {
-                                reader.device.lock().expect("could not lock device").write_lcd(x, y, small).await.unwrap();
+                                device.write_lcd(x, y, small).await.unwrap();
                             }
                         }
 
@@ -115,8 +135,9 @@ async fn main() {
                     }
                 }
             }
-
-            drop(reader);
         }
+
+        animation_thread.abort();
+        device.reset().await.expect("could not reset deck");
     }
 }
