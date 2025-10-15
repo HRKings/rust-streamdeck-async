@@ -1,26 +1,26 @@
 use std::str::{from_utf8, Utf8Error};
 use std::time::Duration;
-use async_hid::{AsyncHidRead, AsyncHidWrite, DeviceReader, DeviceWriter, HidResult};
+use async_hid::{AsyncHidRead, AsyncHidWrite, Device, DeviceReader, DeviceWriter, HidResult};
 use futures_lite::FutureExt;
 
 use crate::{Kind, StreamDeckError, StreamDeckInput};
 
 /// Performs get_feature_report on [HidDevice]
-pub async fn get_feature_report(device: &mut DeviceReader, report_id: u8, length: usize) -> HidResult<Vec<u8>> {
+pub async fn get_feature_report(device: &mut Device, report_id: u8, length: usize) -> HidResult<Vec<u8>> {
     let mut buff = vec![0u8; length];
 
     // Inserting report id byte
     buff.insert(0, report_id);
 
     // Getting feature report
-    device.read_input_report(buff.as_mut_slice()).await?;
+    device.read_feature_report(buff.as_mut_slice()).await?;
 
     Ok(buff)
 }
 
 /// Performs send_feature_report on [HidDevice]
-pub async fn send_feature_report(device: &mut DeviceWriter, payload: &[u8]) -> HidResult<()> {
-    device.write_output_report(payload).await
+pub async fn send_feature_report(device: &mut Device, payload: &mut [u8]) -> HidResult<usize> {
+    device.write_feature_report(payload).await
 }
 
 /// Reads data from [HidDevice]. Blocking mode is used if timeout is specified
